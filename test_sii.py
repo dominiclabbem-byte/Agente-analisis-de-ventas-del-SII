@@ -112,11 +112,10 @@ def test_login_sii():
     else:
         print(f"   ❌ Error HTTP {r3.status_code}")
 
-    # ── STEP 4: Probar API alternativa de SII ────────────────────────────────
-    print("\n4. Probando endpoint de info del contribuyente...")
-    info_url = f"https://www4.sii.cl/consdteweb/consultaDteServicio.html"
+    # ── STEP 4: Verificar acceso al portal de consulta DTE ───────────────────
+    print("\n4. Verificando acceso al portal de consulta DTE...")
     r4 = session.get(
-        f"https://siichile.cl/cgi_dte/UPL/DTEUpload",
+        "https://www4.sii.cl/consdteweb/index.html",
         timeout=10
     )
     print(f"   HTTP {r4.status_code}")
