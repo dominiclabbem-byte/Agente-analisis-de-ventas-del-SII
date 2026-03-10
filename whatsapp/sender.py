@@ -1,72 +1,96 @@
 """
-Módulo para envío de mensajes WhatsApp vía Twilio.
+Módulo para envío de mensajes WhatsApp vía Meta Cloud API.
 
 Requisitos previos:
-  1. Crear cuenta en https://www.twilio.com/try-twilio
-  2. Activar WhatsApp Sandbox: Console > Messaging > Try it out > Send a WhatsApp message
-  3. Pedir a cada cliente que envíe "join <palabra>" al número sandbox de Twilio
-  4. (Producción) Solicitar número de WhatsApp Business aprobado
+  1. Crear app en https://developers.facebook.com/apps/
+  2. Agregar producto "WhatsApp" a la app
+  3. En WhatsApp > Configuración de la API obtener:
+     - Phone Number ID
+     - Token de acceso (temporal para pruebas, permanente para producción)
+  4. (Producción) Verificar cuenta Meta Business y solicitar número aprobado
 
 Variables de entorno necesarias:
-  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM
+  META_WHATSAPP_PHONE_NUMBER_ID, META_WHATSAPP_ACCESS_TOKEN, META_WHATSAPP_API_VERSION
 """
 import logging
 from typing import Optional
 
-from twilio.rest import Client
-from twilio.base.exceptions import TwilioRestException
+import requests
 
 import config
 
 logger = logging.getLogger(__name__)
 
-_client: Optional[Client] = None
+_GRAPH_API_BASE = "https://graph.facebook.com"
 
 
-def _get_client() -> Client:
-    global _client
-    if _client is None:
-        if not config.TWILIO_ACCOUNT_SID or not config.TWILIO_AUTH_TOKEN:
-            raise RuntimeError(
-                "Faltan credenciales Twilio. "
-                "Define TWILIO_ACCOUNT_SID y TWILIO_AUTH_TOKEN en .env"
-            )
-        _client = Client(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
-    return _client
+def _get_headers() -> dict:
+    if not config.META_WHATSAPP_ACCESS_TOKEN:
+        raise RuntimeError(
+            "Falta credencial Meta. "
+            "Define META_WHATSAPP_ACCESS_TOKEN en .env"
+        )
+    if not config.META_WHATSAPP_PHONE_NUMBER_ID:
+        raise RuntimeError(
+            "Falta ID de número. "
+            "Define META_WHATSAPP_PHONE_NUMBER_ID en .env"
+        )
+    return {
+        "Authorization": f"Bearer {config.META_WHATSAPP_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+def _get_url() -> str:
+    version = config.META_WHATSAPP_API_VERSION or "v19.0"
+    phone_id = config.META_WHATSAPP_PHONE_NUMBER_ID
+    return f"{_GRAPH_API_BASE}/{version}/{phone_id}/messages"
 
 
 def enviar_mensaje(telefono: str, mensaje: str) -> dict:
     """
-    Envía un mensaje WhatsApp al número indicado.
+    Envía un mensaje WhatsApp al número indicado via Meta Cloud API.
 
     Args:
         telefono: Número en formato E.164, ej: '+56912345678'
-        mensaje:  Texto del mensaje (máx 1600 caracteres)
+        mensaje:  Texto del mensaje (máx 4096 caracteres)
 
     Returns:
-        dict con 'sid', 'estado' y 'error' (None si fue exitoso)
+        dict con 'message_id', 'estado' y 'error' (None si fue exitoso)
     """
     telefono = _normalizar_telefono(telefono)
     if not telefono:
-        return {"sid": None, "estado": "ERROR", "error": "Número de teléfono inválido"}
+        return {"message_id": None, "estado": "ERROR", "error": "Número de teléfono inválido"}
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": telefono,
+        "type": "text",
+        "text": {"preview_url": False, "body": mensaje[:4096]},
+    }
 
     try:
-        client = _get_client()
-        message = client.messages.create(
-            from_=f"whatsapp:{config.TWILIO_WHATSAPP_FROM}",
-            to=f"whatsapp:{telefono}",
-            body=mensaje[:1600],
+        response = requests.post(
+            _get_url(),
+            headers=_get_headers(),
+            json=payload,
+            timeout=15,
         )
-        logger.info("WhatsApp enviado a %s | SID: %s", telefono, message.sid)
-        return {"sid": message.sid, "estado": message.status, "error": None}
+        data = response.json()
 
-    except TwilioRestException as e:
-        logger.error("Error Twilio enviando a %s: %s", telefono, e.msg)
-        return {"sid": None, "estado": "ERROR", "error": str(e.msg)}
+        if response.ok and "messages" in data:
+            msg_id = data["messages"][0].get("id", "")
+            logger.info("WhatsApp enviado a %s | ID: %s", telefono, msg_id)
+            return {"message_id": msg_id, "estado": "sent", "error": None}
 
-    except Exception as e:
-        logger.error("Error inesperado enviando WhatsApp a %s: %s", telefono, e)
-        return {"sid": None, "estado": "ERROR", "error": str(e)}
+        error_msg = data.get("error", {}).get("message", response.text)
+        logger.error("Error Meta API enviando a %s: %s", telefono, error_msg)
+        return {"message_id": None, "estado": "ERROR", "error": error_msg}
+
+    except requests.RequestException as e:
+        logger.error("Error de red enviando WhatsApp a %s: %s", telefono, e)
+        return {"message_id": None, "estado": "ERROR", "error": str(e)}
 
 
 def enviar_mensajes_masivos(destinatarios: list[dict]) -> list[dict]:
